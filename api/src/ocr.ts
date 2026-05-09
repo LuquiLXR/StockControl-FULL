@@ -125,13 +125,22 @@ export function parseVitalTicketWords(words: TsvWord[], sourcePage: number): Ocr
   const xCant = cantWord.left;
   const xDesc = descWord.left;
   const xUxb = uxbWord?.left ?? null;
+  const priceWord = header.words.find((w) => {
+    const t = normToken(w.text);
+    return t === 'PRECIO' || t === 'PRECI0' || t === 'IMPORTE';
+  });
+
+  const articuloMin = Math.max(0, xArticulo - 30);
+  const articuloMax = Math.max(articuloMin + 1, xCant - 30);
 
   const qtyMin = Math.max(0, xCant - 55);
-  const qtyMax = Math.max(qtyMin + 1, Math.min(xCant + 140, xDesc - 20));
-  const descMin = Math.max(xCant + 70, xDesc - 90);
-  const descMax = xUxb != null ? xUxb - 10 : xDesc + 900;
-  const uxbMin = xUxb != null ? xUxb - 20 : null;
-  const uxbMax = xUxb != null ? xUxb + 120 : null;
+  const qtyMax = Math.max(qtyMin + 1, Math.min(xCant + 90, xDesc - 35));
+
+  const descMin = Math.max(qtyMax + 15, xDesc - 180);
+  const descMax = xUxb != null ? xUxb - 12 : priceWord ? priceWord.left - 12 : xDesc + 650;
+
+  const uxbMin = xUxb != null ? xUxb - 25 : null;
+  const uxbMax = xUxb != null ? xUxb + 140 : null;
 
   const out: OcrParsedLine[] = [];
   let inPromos = false;
@@ -147,6 +156,10 @@ export function parseVitalTicketWords(words: TsvWord[], sourcePage: number): Ocr
     }
     if (inPromos) continue;
 
+    const articuloWords = l.words.filter((w) => w.left >= articuloMin && w.left <= articuloMax).sort((a, b) => a.left - b.left);
+    const rawArticulo = joinWords(articuloWords);
+    const hasArticuloId = Boolean(rawArticulo.match(/\b\d{5,8}\b/));
+
     const qtyWords = l.words.filter((w) => w.left >= qtyMin && w.left <= qtyMax).sort((a, b) => a.left - b.left);
     const descWords = l.words.filter((w) => w.left >= descMin && w.left <= descMax).sort((a, b) => a.left - b.left);
     const uxbWords =
@@ -159,9 +172,10 @@ export function parseVitalTicketWords(words: TsvWord[], sourcePage: number): Ocr
     const descIsEmpty = !rawDescription || rawDescription.length < 2;
     if (descIsEmpty) continue;
 
-    const maybeWrap = (!rawQuantity || rawQuantity.length === 0) && (!rawUxb || rawUxb.length === 0);
+    const maybeWrap = (!rawQuantity || rawQuantity.length === 0) && (!rawUxb || rawUxb.length === 0) && !hasArticuloId;
     if (maybeWrap && out.length > 0) {
       const prev = out[out.length - 1];
+      if (prev.ignored) continue;
       prev.description = cleanSpaces(`${prev.description} ${rawDescription}`);
       prev.rawDescription = cleanSpaces(`${prev.rawDescription ?? ''} ${rawDescription}`.trim()) || prev.rawDescription;
       continue;
@@ -279,11 +293,19 @@ function normalizeLine(input: {
     return { quantityUnits: 1, description, ignored: false, avgConfidence: input.confidence };
   }
 
-  const baseQty = qtyNum != null ? qtyNum : 0;
-  const pack = uxb != null && Number.isFinite(uxb) && uxb > 0 && baseQty > 0 && baseQty <= 50 ? uxb : 1;
+  if (qtyNum == null) return { quantityUnits: 0, description: rawDescription, ignored: true, avgConfidence: input.confidence };
+  if (qtyNum <= 0) return { quantityUnits: 0, description: rawDescription, ignored: true, avgConfidence: input.confidence };
+  if (!Number.isInteger(qtyNum)) return { quantityUnits: 0, description: rawDescription, ignored: true, avgConfidence: input.confidence };
+
+  const baseQty = qtyNum;
+  const pack = uxb != null && Number.isFinite(uxb) && uxb >= 2 ? uxb : 1;
+  if (pack > 1 && baseQty > 20) return { quantityUnits: 0, description: rawDescription, ignored: true, avgConfidence: input.confidence };
+  if (pack === 1 && baseQty > 50) return { quantityUnits: 0, description: rawDescription, ignored: true, avgConfidence: input.confidence };
+
   const quantityUnits = Math.round(baseQty * pack);
   const description = rawDescription;
 
   if (!description || quantityUnits <= 0) return { quantityUnits: 0, description, ignored: true, avgConfidence: input.confidence };
+  if (quantityUnits > 200) return { quantityUnits: 0, description, ignored: true, avgConfidence: input.confidence };
   return { quantityUnits, description, ignored: false, avgConfidence: input.confidence };
 }

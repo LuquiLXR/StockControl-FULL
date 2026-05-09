@@ -53,13 +53,26 @@ async function processTicket(db: Db, ticketId: string) {
 
     let lineIndex = 0;
     for (const p of pages) {
+      const candidates: Array<{ psm: number; parsed: ReturnType<typeof parseVitalTicketWords> }> = [];
+
       const words6 = await tesseractTsv(p.file_path, { psm: 6 });
-      const parsed6 = parseVitalTicketWords(words6, p.page_index);
+      candidates.push({ psm: 6, parsed: parseVitalTicketWords(words6, p.page_index) });
 
-      const words4 = parsed6.length === 0 ? await tesseractTsv(p.file_path, { psm: 4 }) : null;
-      const parsed4 = words4 ? parseVitalTicketWords(words4, p.page_index) : [];
+      const words4 = await tesseractTsv(p.file_path, { psm: 4 });
+      candidates.push({ psm: 4, parsed: parseVitalTicketWords(words4, p.page_index) });
 
-      const parsed = parsed4.length > parsed6.length ? parsed4 : parsed6;
+      const words1 = await tesseractTsv(p.file_path, { psm: 1 });
+      candidates.push({ psm: 1, parsed: parseVitalTicketWords(words1, p.page_index) });
+
+      const best = candidates
+        .map((c) => {
+          const avgConf = c.parsed.map((l) => l.avgConfidence ?? 0).reduce((a, b) => a + b, 0) / Math.max(1, c.parsed.length);
+          const score = c.parsed.length * 1000 + avgConf;
+          return { ...c, score };
+        })
+        .sort((a, b) => b.score - a.score)[0];
+
+      const parsed = best?.parsed ?? [];
       for (const l of parsed) {
         await db.query(
           [
