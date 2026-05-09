@@ -137,7 +137,7 @@ export function parseVitalTicketWords(words: TsvWord[], sourcePage: number): Ocr
   const qtyMax = Math.max(qtyMin + 1, Math.min(xCant + 90, xDesc - 35));
 
   const descMin = Math.max(qtyMax + 15, xDesc - 180);
-  const descMax = xUxb != null ? xUxb - 12 : priceWord ? priceWord.left - 12 : xDesc + 650;
+  const descMax = xUxb != null ? xUxb - 12 : priceWord ? priceWord.left - 12 : xDesc + 900;
 
   const uxbMin = xUxb != null ? xUxb - 25 : null;
   const uxbMax = xUxb != null ? xUxb + 140 : null;
@@ -160,6 +160,8 @@ export function parseVitalTicketWords(words: TsvWord[], sourcePage: number): Ocr
     const rawArticulo = joinWords(articuloWords);
     const hasArticuloId = Boolean(rawArticulo.match(/\b\d{5,8}\b/));
 
+    if (!hasArticuloId) continue;
+
     const qtyWords = l.words.filter((w) => w.left >= qtyMin && w.left <= qtyMax).sort((a, b) => a.left - b.left);
     const descWords = l.words.filter((w) => w.left >= descMin && w.left <= descMax).sort((a, b) => a.left - b.left);
     const uxbWords =
@@ -171,15 +173,6 @@ export function parseVitalTicketWords(words: TsvWord[], sourcePage: number): Ocr
 
     const descIsEmpty = !rawDescription || rawDescription.length < 2;
     if (descIsEmpty) continue;
-
-    const maybeWrap = (!rawQuantity || rawQuantity.length === 0) && (!rawUxb || rawUxb.length === 0) && !hasArticuloId;
-    if (maybeWrap && out.length > 0) {
-      const prev = out[out.length - 1];
-      if (prev.ignored) continue;
-      prev.description = cleanSpaces(`${prev.description} ${rawDescription}`);
-      prev.rawDescription = cleanSpaces(`${prev.rawDescription ?? ''} ${rawDescription}`.trim()) || prev.rawDescription;
-      continue;
-    }
 
     const extracted = extractQuantity(qtyWords);
     const { quantityUnits, description, ignored, avgConfidence } = normalizeLine({
@@ -271,8 +264,10 @@ function normalizeLine(input: {
   confidence: number | null;
 }) {
   const rawQuantity = cleanSpaces(input.rawQuantity);
-  const rawDescription = cleanSpaces(input.rawDescription);
+  let rawDescription = cleanSpaces(input.rawDescription);
   const rawUxb = cleanSpaces(input.rawUxb);
+
+  rawDescription = rawDescription.replace(/^(?:Y|A|V|I)\s+(?=\p{L})/iu, '');
 
   const descTokens = normToken(rawDescription);
   if (descTokens.includes('TOTAL') && !descTokens.includes('TOTALMENTE')) return { quantityUnits: 0, description: rawDescription, ignored: true, avgConfidence: input.confidence };
