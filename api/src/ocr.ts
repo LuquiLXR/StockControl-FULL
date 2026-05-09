@@ -215,7 +215,12 @@ function parseDecimal(input: string) {
   return Number.isFinite(n) ? n : null;
 }
 
-function extractQuantity(qtyWords: TsvWord[]) {
+function extractQuantity(qtyWords: TsvWord[]): {
+  rawQuantity: string;
+  quantityText: string;
+  quantityNumber: number | null;
+  quantityUnit: 'KG' | 'OTHER';
+} {
   const rawQuantity = joinWords(qtyWords);
   const tokens = qtyWords.map((w) => normToken(w.text));
   const hasKg = tokens.includes('KG') || tokens.some((t) => t.endsWith('KG'));
