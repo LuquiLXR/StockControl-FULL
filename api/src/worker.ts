@@ -53,8 +53,13 @@ async function processTicket(db: Db, ticketId: string) {
 
     let lineIndex = 0;
     for (const p of pages) {
-      const words = await tesseractTsv(p.file_path);
-      const parsed = parseVitalTicketWords(words, p.page_index);
+      const words6 = await tesseractTsv(p.file_path, { psm: 6 });
+      const parsed6 = parseVitalTicketWords(words6, p.page_index);
+
+      const words4 = parsed6.length === 0 ? await tesseractTsv(p.file_path, { psm: 4 }) : null;
+      const parsed4 = words4 ? parseVitalTicketWords(words4, p.page_index) : [];
+
+      const parsed = parsed4.length > parsed6.length ? parsed4 : parsed6;
       for (const l of parsed) {
         await db.query(
           [

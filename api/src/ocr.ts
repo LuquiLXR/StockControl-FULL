@@ -29,8 +29,9 @@ export type OcrParsedLine = {
   ignored: boolean;
 };
 
-export async function tesseractTsv(imagePath: string) {
-  const args = [imagePath, 'stdout', '-l', 'spa', '--psm', '6', 'tsv'];
+export async function tesseractTsv(imagePath: string, input?: { psm?: number }) {
+  const psm = input?.psm ?? 6;
+  const args = [imagePath, 'stdout', '-l', 'spa', '--psm', String(psm), '-c', 'user_defined_dpi=300', 'tsv'];
   const { stdout } = await execFileAsync('tesseract', args, { maxBuffer: 50 * 1024 * 1024 });
   return parseTsv(stdout);
 }
@@ -97,7 +98,16 @@ export function parseVitalTicketWords(words: TsvWord[], sourcePage: number): Ocr
   });
   lines.sort((a, b) => a.top - b.top);
 
-  const header = lines.find((l) => l.tokens.some((t) => t === 'CANT.' || t === 'CANT') && l.tokens.some((t) => t.startsWith('DESCRIP')));
+  const header = lines.find(
+    (l) =>
+      l.tokens.some((t) => t === 'ARTICULO' || t === 'ARTICUL0') &&
+      l.tokens.some((t) => t === 'CANT.' || t === 'CANT') &&
+      l.tokens.some((t) => t.startsWith('DESCRIP'))
+  );
+  const articuloWord = header?.words.find((w) => {
+    const t = normToken(w.text);
+    return t === 'ARTICULO' || t === 'ARTICUL0';
+  });
   const cantWord = header?.words.find((w) => {
     const t = normToken(w.text);
     return t === 'CANT.' || t === 'CANT';
@@ -111,13 +121,14 @@ export function parseVitalTicketWords(words: TsvWord[], sourcePage: number): Ocr
   if (!header || !cantWord || !descWord) return [];
 
   const headerTop = header.top;
+  const xArticulo = articuloWord?.left ?? 0;
   const xCant = cantWord.left;
   const xDesc = descWord.left;
   const xUxb = uxbWord?.left ?? null;
 
-  const qtyMin = Math.max(0, xCant - 40);
-  const qtyMax = Math.max(qtyMin + 1, xDesc - 10);
-  const descMin = xDesc - 10;
+  const qtyMin = Math.max(0, xCant - 55);
+  const qtyMax = Math.max(qtyMin + 1, Math.min(xCant + 140, xDesc - 20));
+  const descMin = Math.max(xCant + 70, xDesc - 90);
   const descMax = xUxb != null ? xUxb - 10 : xDesc + 900;
   const uxbMin = xUxb != null ? xUxb - 20 : null;
   const uxbMax = xUxb != null ? xUxb + 120 : null;
@@ -156,10 +167,14 @@ export function parseVitalTicketWords(words: TsvWord[], sourcePage: number): Ocr
       continue;
     }
 
+    const extracted = extractQuantity(qtyWords);
     const { quantityUnits, description, ignored, avgConfidence } = normalizeLine({
       rawQuantity,
       rawDescription,
       rawUxb,
+      quantityText: extracted.quantityText,
+      quantityNumber: extracted.quantityNumber,
+      quantityUnit: extracted.quantityUnit,
       confidence: avgLineConfidence(l.words),
     });
 
@@ -200,7 +215,42 @@ function parseDecimal(input: string) {
   return Number.isFinite(n) ? n : null;
 }
 
-function normalizeLine(input: { rawQuantity: string; rawDescription: string; rawUxb: string; confidence: number | null }) {
+function extractQuantity(qtyWords: TsvWord[]) {
+  const rawQuantity = joinWords(qtyWords);
+  const tokens = qtyWords.map((w) => normToken(w.text));
+  const hasKg = tokens.includes('KG') || tokens.some((t) => t.endsWith('KG'));
+
+  const numericCandidates = qtyWords
+    .map((w) => {
+      const t = w.text.trim();
+      const m = t.match(/^(\d{1,3}(?:[.,]\d{1,3})?)$/);
+      if (!m) return null;
+      const n = parseDecimal(m[1]);
+      if (n == null) return null;
+      if (n > 500) return null;
+      return { text: m[1], num: n, conf: w.conf };
+    })
+    .filter((x): x is { text: string; num: number; conf: number } => Boolean(x))
+    .sort((a, b) => b.conf - a.conf);
+
+  const best = numericCandidates[0] ?? null;
+  return {
+    rawQuantity,
+    quantityText: best?.text ?? '',
+    quantityNumber: best?.num ?? null,
+    quantityUnit: hasKg ? 'KG' : 'OTHER',
+  };
+}
+
+function normalizeLine(input: {
+  rawQuantity: string;
+  rawDescription: string;
+  rawUxb: string;
+  quantityText: string;
+  quantityNumber: number | null;
+  quantityUnit: 'KG' | 'OTHER';
+  confidence: number | null;
+}) {
   const rawQuantity = cleanSpaces(input.rawQuantity);
   const rawDescription = cleanSpaces(input.rawDescription);
   const rawUxb = cleanSpaces(input.rawUxb);
@@ -208,11 +258,13 @@ function normalizeLine(input: { rawQuantity: string; rawDescription: string; raw
   const descTokens = normToken(rawDescription);
   if (descTokens.includes('TOTAL') && !descTokens.includes('TOTALMENTE')) return { quantityUnits: 0, description: rawDescription, ignored: true, avgConfidence: input.confidence };
 
-  const qtyMatch = rawQuantity.match(/(\d+[.,]?\d*)/);
-  const qtyText = qtyMatch?.[1] ?? '';
-  const qtyNum = qtyText ? parseDecimal(qtyText) : null;
+  const lettersCount = (rawDescription.match(/\p{L}/gu) ?? []).length;
+  if (lettersCount < 3 && /[-=]{3,}/.test(rawDescription)) return { quantityUnits: 0, description: rawDescription, ignored: true, avgConfidence: input.confidence };
 
-  const unit = normToken(rawQuantity).includes('KG') ? 'KG' : 'OTHER';
+  const qtyText = input.quantityText || (rawQuantity.match(/(\d{1,3}[.,]?\d{0,3})/)?.[1] ?? '');
+  const qtyNum = input.quantityNumber ?? (qtyText ? parseDecimal(qtyText) : null);
+
+  const unit = input.quantityUnit === 'KG' || normToken(rawQuantity).includes('KG') ? 'KG' : 'OTHER';
   const uxbMatch = rawUxb.match(/(\d{1,3})/);
   const uxb = uxbMatch ? Number(uxbMatch[1]) : null;
 
@@ -223,11 +275,10 @@ function normalizeLine(input: { rawQuantity: string; rawDescription: string; raw
   }
 
   const baseQty = qtyNum != null ? qtyNum : 0;
-  const pack = uxb != null && Number.isFinite(uxb) && uxb > 0 ? uxb : 1;
+  const pack = uxb != null && Number.isFinite(uxb) && uxb > 0 && baseQty > 0 && baseQty <= 50 ? uxb : 1;
   const quantityUnits = Math.round(baseQty * pack);
   const description = rawDescription;
 
   if (!description || quantityUnits <= 0) return { quantityUnits: 0, description, ignored: true, avgConfidence: input.confidence };
   return { quantityUnits, description, ignored: false, avgConfidence: input.confidence };
 }
-
