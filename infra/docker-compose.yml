@@ -1,0 +1,89 @@
+version: "3.9"
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: stockcontrol-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - stockcontrol_net
+  api:
+    build:
+      context: ../api
+      dockerfile: Dockerfile
+    container_name: stockcontrol-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 8080
+      JWT_SECRET: ${JWT_SECRET}
+      MAGIC_LINK_CALLBACK_URL: ${MAGIC_LINK_CALLBACK_URL}
+      MAGIC_LINK_TTL_MINUTES: ${MAGIC_LINK_TTL_MINUTES:-15}
+      REFRESH_TTL_DAYS: ${REFRESH_TTL_DAYS:-30}
+      AUTH_DEV_RETURN_TOKEN: ${AUTH_DEV_RETURN_TOKEN:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+      UPLOAD_DIR: /data/uploads
+      OCR_WORKER_ENABLED: ${OCR_WORKER_ENABLED:-true}
+      OCR_WORKER_POLL_MS: ${OCR_WORKER_POLL_MS:-2000}
+    depends_on:
+      - postgres
+    networks:
+      - stockcontrol_net
+    ports:
+      - "${API_HOST_PORT:-8088}:8080"
+    volumes:
+      - api_uploads:/data/uploads
+  pgbackups:
+    image: prodrigestivill/postgres-backup-local:15
+    container_name: stockcontrol-pgbackups
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      SCHEDULE: "0 2 * * *"
+      BACKUP_DIR: /backups
+    volumes:
+      - pg_backups:/backups
+    depends_on:
+      - postgres
+    networks:
+      - stockcontrol_net
+  netdata:
+    image: netdata/netdata:stable
+    container_name: stockcontrol-netdata
+    restart: unless-stopped
+    cap_add:
+      - SYS_PTRACE
+    ports:
+      - "19999:19999"
+    volumes:
+      - netdata_config:/etc/netdata
+      - netdata_cache:/var/cache/netdata
+      - /etc/passwd:/host/etc/passwd:ro
+      - /etc/group:/host/etc/group:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc/os-release:/host/etc/os-release:ro
+    networks:
+      - stockcontrol_net
+networks:
+  stockcontrol_net:
+volumes:
+  postgres_data:
+  pg_backups:
+  netdata_config:
+  netdata_cache:
+  api_uploads:

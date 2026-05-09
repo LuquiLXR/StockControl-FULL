@@ -1,0 +1,8 @@
+infra/env/.env
+api/node_modules
+api/dist
+api/.env
+mobile/node_modules
+mobile/.expo
+mobile/.env
+**/.DS_Store
