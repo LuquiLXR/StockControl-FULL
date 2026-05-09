@@ -78,10 +78,17 @@ async function processTicket(db: Db, ticketId: string) {
       }
     }
 
+    if (lineIndex === 0) {
+      await db.query("UPDATE tickets SET status = 'failed', error_text = $2, updated_at = now() WHERE id = $1", [
+        ticketId,
+        'OCR completado, pero no se detectaron líneas. Probá con fotos más nítidas o usá Reprocesar.',
+      ]);
+      return;
+    }
+
     await db.query("UPDATE tickets SET status = 'done', error_text = NULL, updated_at = now() WHERE id = $1", [ticketId]);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'OCR failed';
     await db.query("UPDATE tickets SET status = 'failed', error_text = $2, updated_at = now() WHERE id = $1", [ticketId, msg.slice(0, 500)]);
   }
 }
-

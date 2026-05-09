@@ -67,6 +67,14 @@ export async function registerAuthRoutes(app: FastifyInstance, db: Db) {
     const email = typeof body?.email === 'string' ? body.email.trim().toLowerCase() : '';
     if (!email || !email.includes('@')) return reply.code(400).send({ error: 'Email inválido' });
 
+    const smtpCfg = getSmtpConfig();
+    const allowDevReturn = process.env.AUTH_DEV_RETURN_TOKEN === 'true';
+    if (!smtpCfg && !allowDevReturn) {
+      return reply
+        .code(500)
+        .send({ error: 'SMTP no configurado. Configurá SMTP_* o activá AUTH_DEV_RETURN_TOKEN=true para obtener un token de prueba.' });
+    }
+
     const user = await queryOne<{ id: string; email: string }>(db, 'SELECT id, email FROM users WHERE email = $1', [email]);
     const userId =
       user?.id ??
@@ -84,10 +92,13 @@ export async function registerAuthRoutes(app: FastifyInstance, db: Db) {
     ]);
 
     const link = buildMagicLink(token);
-    await sendMagicLinkEmail({ email, link });
+    if (!smtpCfg && allowDevReturn) return reply.send({ devToken: token, devLink: link });
 
-    const allowDevReturn = process.env.AUTH_DEV_RETURN_TOKEN === 'true' && process.env.NODE_ENV !== 'production';
-    if (allowDevReturn && !getSmtpConfig()) return reply.send({ devToken: token, devLink: link });
+    try {
+      await sendMagicLinkEmail({ email, link });
+    } catch {
+      return reply.code(500).send({ error: 'No se pudo enviar el email. Verificá SMTP_*.' });
+    }
 
     return reply.code(204).send();
   });
@@ -152,4 +163,3 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
     return reply.code(401).send({ error: 'Unauthorized' });
   }
 }
-
