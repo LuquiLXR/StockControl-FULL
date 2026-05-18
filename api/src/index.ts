@@ -6,6 +6,7 @@ import { runMigrations } from './migrations.js';
 import { registerAuthRoutes } from './auth.js';
 import { registerTicketRoutes } from './tickets.js';
 import { registerInventoryRoutes } from './inventory.js';
+import { registerGroupRoutes } from './groups.js';
 import { startOcrWorker } from './worker.js';
 
 const app = Fastify({ logger: true, bodyLimit: 30 * 1024 * 1024 });
@@ -28,6 +29,7 @@ const db = createDbPool();
 await runMigrations(db);
 
 await registerAuthRoutes(app, db);
+await registerGroupRoutes(app, db);
 await registerInventoryRoutes(app, db);
 await registerTicketRoutes(app, db);
 
@@ -37,4 +39,3 @@ const port = Number(process.env.PORT ?? '8080');
 const host = process.env.HOST ?? '0.0.0.0';
 
 await app.listen({ port, host });
-

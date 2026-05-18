@@ -5,18 +5,23 @@ import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { Db, queryAll, queryOne } from './db.js';
 import { requireAuth } from './auth.js';
+import { getGroupId, makeRequireGroup } from './groups.js';
 
 export async function registerTicketRoutes(app: FastifyInstance, db: Db) {
-  app.post('/tickets', { preHandler: requireAuth }, async (req, reply) => {
+  const requireGroup = makeRequireGroup(db);
+
+  app.post('/tickets', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
     const userId = (req as any).user.sub as string;
+    const groupId = getGroupId(req);
 
     const parts = (req as any).files?.();
     if (!parts) return reply.code(400).send({ error: 'Se requiere multipart' });
 
-    const created = await queryOne<{ id: string }>(db, 'INSERT INTO tickets(user_id, status) VALUES ($1, $2) RETURNING id', [
-      userId,
-      'uploaded',
-    ]);
+    const created = await queryOne<{ id: string }>(
+      db,
+      'INSERT INTO tickets(user_id, group_id, status) VALUES ($1, $2, $3) RETURNING id',
+      [userId, groupId, 'uploaded']
+    );
     const ticketId = created?.id;
     if (!ticketId) return reply.code(500).send({ error: 'No se pudo crear ticket' });
 
@@ -39,14 +44,14 @@ export async function registerTicketRoutes(app: FastifyInstance, db: Db) {
     return reply.send({ ticketId });
   });
 
-  app.get('/tickets/:id', { preHandler: requireAuth }, async (req, reply) => {
-    const userId = (req as any).user.sub as string;
+  app.get('/tickets/:id', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const groupId = getGroupId(req);
     const id = (req.params as any).id as string;
 
     const ticket = await queryOne<{ id: string; status: string; error_text: string | null; created_at: string }>(
       db,
-      'SELECT id, status, error_text, created_at FROM tickets WHERE id = $1 AND user_id = $2',
-      [id, userId]
+      'SELECT id, status, error_text, created_at FROM tickets WHERE id = $1 AND group_id = $2',
+      [id, groupId]
     );
     if (!ticket) return reply.code(404).send({ error: 'Ticket no encontrado' });
 
@@ -62,28 +67,28 @@ export async function registerTicketRoutes(app: FastifyInstance, db: Db) {
     return reply.send({ ticket, lines });
   });
 
-  app.post('/tickets/:id/reprocess', { preHandler: requireAuth }, async (req, reply) => {
-    const userId = (req as any).user.sub as string;
+  app.post('/tickets/:id/reprocess', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const groupId = getGroupId(req);
     const id = (req.params as any).id as string;
     const updated = await queryOne<{ id: string }>(
       db,
-      'UPDATE tickets SET status = $3, error_text = NULL, updated_at = now() WHERE id = $1 AND user_id = $2 RETURNING id',
-      [id, userId, 'uploaded']
+      'UPDATE tickets SET status = $3, error_text = NULL, updated_at = now() WHERE id = $1 AND group_id = $2 RETURNING id',
+      [id, groupId, 'uploaded']
     );
     if (!updated) return reply.code(404).send({ error: 'Ticket no encontrado' });
     await db.query('DELETE FROM ticket_lines WHERE ticket_id = $1', [id]);
     return reply.send({ ok: true });
   });
 
-  app.post('/tickets/:id/apply', { preHandler: requireAuth }, async (req, reply) => {
-    const userId = (req as any).user.sub as string;
+  app.post('/tickets/:id/apply', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const groupId = getGroupId(req);
     const id = (req.params as any).id as string;
     const body = req.body as { lineIds?: unknown; locationId?: unknown };
     const locationId = typeof body?.locationId === 'string' && body.locationId.trim() ? body.locationId.trim() : 'loc_sin_ubicacion';
     const lineIds = Array.isArray(body?.lineIds) ? body.lineIds.filter((x) => typeof x === 'string') : [];
     if (lineIds.length === 0) return reply.code(400).send({ error: 'lineIds requerido' });
 
-    const ticket = await queryOne<{ id: string }>(db, 'SELECT id FROM tickets WHERE id = $1 AND user_id = $2', [id, userId]);
+    const ticket = await queryOne<{ id: string }>(db, 'SELECT id FROM tickets WHERE id = $1 AND group_id = $2', [id, groupId]);
     if (!ticket) return reply.code(404).send({ error: 'Ticket no encontrado' });
 
     await db.query('BEGIN');
@@ -104,18 +109,22 @@ export async function registerTicketRoutes(app: FastifyInstance, db: Db) {
         const normBrand = normalizeKey(brand);
 
         const product =
-          (await queryOne<{ id: string }>(db, 'SELECT id FROM products WHERE norm_name = $1 AND norm_brand = $2', [normName, normBrand])) ??
+          (await queryOne<{ id: string }>(db, 'SELECT id FROM products WHERE group_id = $1 AND norm_name = $2 AND norm_brand = $3', [
+            groupId,
+            normName,
+            normBrand,
+          ])) ??
           (await queryOne<{ id: string }>(
             db,
-            'INSERT INTO products(display_name, brand, norm_name, norm_brand) VALUES ($1,$2,$3,$4) RETURNING id',
-            [displayName, brand, normName, normBrand]
+            'INSERT INTO products(group_id, display_name, brand, norm_name, norm_brand) VALUES ($1,$2,$3,$4,$5) RETURNING id',
+            [groupId, displayName, brand, normName, normBrand]
           ));
         if (!product) continue;
 
         const existing = await queryOne<{ id: string; stock_current: string; stock_unit: string }>(
           db,
-          'SELECT id, stock_current, stock_unit FROM stock_items WHERE product_id = $1 AND location_id = $2 AND deleted_at IS NULL',
-          [product.id, locationId]
+          'SELECT id, stock_current, stock_unit FROM stock_items WHERE group_id = $1 AND product_id = $2 AND location_id = $3 AND deleted_at IS NULL',
+          [groupId, product.id, locationId]
         );
 
         let stockItemId: string;
@@ -128,14 +137,19 @@ export async function registerTicketRoutes(app: FastifyInstance, db: Db) {
         } else {
           const created = await queryOne<{ id: string }>(
             db,
-            'INSERT INTO stock_items(product_id, location_id, stock_current, stock_min, stock_unit) VALUES ($1,$2,$3,$4,$5) RETURNING id',
-            [product.id, locationId, qty, null, 'unidades']
+            'INSERT INTO stock_items(group_id, product_id, location_id, stock_current, stock_min, stock_unit) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id',
+            [groupId, product.id, locationId, qty, null, 'unidades']
           );
           if (!created) continue;
           stockItemId = created.id;
         }
 
-        await db.query('INSERT INTO stock_movements(stock_item_id, delta, reason) VALUES ($1,$2,$3)', [stockItemId, qty, `ticket:${id}`]);
+        await db.query('INSERT INTO stock_movements(group_id, stock_item_id, delta, reason) VALUES ($1,$2,$3,$4)', [
+          groupId,
+          stockItemId,
+          qty,
+          `ticket:${id}`,
+        ]);
       }
 
       await db.query('UPDATE tickets SET status = $2, updated_at = now() WHERE id = $1', [id, 'confirmed']);
@@ -147,13 +161,13 @@ export async function registerTicketRoutes(app: FastifyInstance, db: Db) {
     }
   });
 
-  app.post('/tickets/:id/confirm', { preHandler: requireAuth }, async (req, reply) => {
-    const userId = (req as any).user.sub as string;
+  app.post('/tickets/:id/confirm', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const groupId = getGroupId(req);
     const id = (req.params as any).id as string;
     const updated = await queryOne<{ id: string }>(
       db,
-      'UPDATE tickets SET status = $3, updated_at = now() WHERE id = $1 AND user_id = $2 RETURNING id',
-      [id, userId, 'confirmed']
+      'UPDATE tickets SET status = $3, updated_at = now() WHERE id = $1 AND group_id = $2 RETURNING id',
+      [id, groupId, 'confirmed']
     );
     if (!updated) return reply.code(404).send({ error: 'Ticket no encontrado' });
     return reply.send({ ok: true });
