@@ -5,7 +5,7 @@ services:
     container_name: stockcontrol-postgres
     restart: unless-stopped
     env_file:
-      - ./env/.env
+      - ./infra/env/.env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -17,7 +17,7 @@ services:
     container_name: stockcontrol-api
     restart: unless-stopped
     env_file:
-      - ./env/.env
+      - ./infra/env/.env
     environment:
       PORT: 8080
       UPLOAD_DIR: /data/uploads
@@ -36,7 +36,7 @@ services:
     container_name: stockcontrol-pgbackups
     restart: unless-stopped
     env_file:
-      - ./env/.env
+      - ./infra/env/.env
     environment:
       POSTGRES_HOST: postgres
       SCHEDULE: "0 2 * * *"
