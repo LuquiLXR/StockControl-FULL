@@ -57,7 +57,7 @@ export async function initRealtime(app: FastifyInstance, db: Db) {
   });
 }
 
-export function emitGroupEvent(input: { groupId: string; kind: 'inventory' | 'shopping' | 'groups' }) {
+export function emitGroupEvent(input: { groupId: string; kind: 'inventory' | 'shopping' | 'groups' | 'locations' }) {
   const set = groups.get(input.groupId);
   if (!set || set.size === 0) return;
   const msg = JSON.stringify({ type: 'event', kind: input.kind, groupId: input.groupId, at: Date.now() });
@@ -68,4 +68,3 @@ export function emitGroupEvent(input: { groupId: string; kind: 'inventory' | 'sh
     }
   }
 }
-

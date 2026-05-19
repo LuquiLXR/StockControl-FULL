@@ -39,15 +39,108 @@ async function ensureShoppingTables(db: Db) {
   );
 }
 
+async function getDefaultLocationId(db: Db, groupId: string) {
+  const row = await queryOne<{ id: string }>(
+    db,
+    "SELECT id::text AS id FROM group_locations WHERE group_id = $1 AND parent_id IS NULL AND name = 'Sin ubicación' ORDER BY sort_order ASC, created_at ASC LIMIT 1",
+    [groupId]
+  );
+  return row?.id ?? null;
+}
+
 export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
   const requireGroup = makeRequireGroup(db);
 
-  app.get('/locations', { preHandler: requireAuth }, async (_req, reply) => {
-    const rows = await queryAll<{ id: string; name: string; parent_id: string | null; sort_order: number }>(
+  app.get('/locations', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const groupId = getGroupId(req);
+    const rows = await queryAll<{ id: string; name: string; detail: string | null; parent_id: string | null; sort_order: number }>(
       db,
-      'SELECT id, name, parent_id, sort_order FROM locations ORDER BY sort_order ASC, name ASC'
+      "SELECT id::text AS id, name, detail, parent_id::text AS parent_id, sort_order FROM group_locations WHERE group_id = $1 ORDER BY sort_order ASC, name ASC",
+      [groupId]
     );
     return reply.send({ locations: rows });
+  });
+
+  app.post('/locations', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const groupId = getGroupId(req);
+    const body = req.body as { name?: unknown; detail?: unknown; parentId?: unknown; sortOrder?: unknown };
+    const name = typeof body?.name === 'string' ? body.name.trim() : '';
+    const detail = typeof body?.detail === 'string' ? body.detail.trim() : null;
+    const parentId = typeof body?.parentId === 'string' ? body.parentId.trim() : null;
+    const sortOrder = body?.sortOrder == null ? 0 : Number(body.sortOrder);
+    if (!name) return reply.code(400).send({ error: 'name requerido' });
+    if (!Number.isFinite(sortOrder)) return reply.code(400).send({ error: 'sortOrder inválido' });
+
+    if (parentId) {
+      const okParent = await queryOne<{ ok: number }>(db, 'SELECT 1 AS ok FROM group_locations WHERE id = $1::uuid AND group_id = $2', [parentId, groupId]);
+      if (!okParent) return reply.code(400).send({ error: 'parentId inválido' });
+    }
+
+    const created = await queryOne<{ id: string }>(
+      db,
+      'INSERT INTO group_locations(group_id, name, detail, parent_id, sort_order) VALUES ($1,$2,$3,$4::uuid,$5) RETURNING id::text AS id',
+      [groupId, name, detail, parentId, sortOrder]
+    );
+    if (!created) return reply.code(500).send({ error: 'No se pudo crear' });
+    emitGroupEvent({ groupId, kind: 'locations' });
+    emitGroupEvent({ groupId, kind: 'inventory' });
+    return reply.send({ id: created.id });
+  });
+
+  app.post('/locations/:id', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const groupId = getGroupId(req);
+    const id = (req.params as any).id as string;
+    const body = req.body as { name?: unknown; detail?: unknown; sortOrder?: unknown };
+    if (!id) return reply.code(400).send({ error: 'id requerido' });
+    const name = typeof body?.name === 'string' ? body.name.trim() : null;
+    const detail = typeof body?.detail === 'string' ? body.detail.trim() : null;
+    const sortOrder = body?.sortOrder == null ? null : Number(body.sortOrder);
+    if (name != null && !name) return reply.code(400).send({ error: 'name inválido' });
+    if (sortOrder != null && !Number.isFinite(sortOrder)) return reply.code(400).send({ error: 'sortOrder inválido' });
+    if (name == null && detail == null && sortOrder == null) return reply.code(400).send({ error: 'Nada para editar' });
+
+    const updated = await queryOne<{ id: string }>(
+      db,
+      [
+        'UPDATE group_locations',
+        'SET',
+        '  name = COALESCE($3, name),',
+        '  detail = COALESCE($4, detail),',
+        '  sort_order = COALESCE($5, sort_order)',
+        'WHERE id = $1::uuid AND group_id = $2',
+        'RETURNING id::text AS id',
+      ].join('\n'),
+      [id, groupId, name, detail, sortOrder]
+    );
+    if (!updated) return reply.code(404).send({ error: 'No encontrado' });
+    emitGroupEvent({ groupId, kind: 'locations' });
+    emitGroupEvent({ groupId, kind: 'inventory' });
+    return reply.send({ ok: true });
+  });
+
+  app.delete('/locations/:id', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const groupId = getGroupId(req);
+    const id = (req.params as any).id as string;
+    if (!id) return reply.code(400).send({ error: 'id requerido' });
+
+    const hasChild = await queryOne<{ ok: number }>(
+      db,
+      'SELECT 1 AS ok FROM group_locations WHERE parent_id = $1::uuid AND group_id = $2 LIMIT 1',
+      [id, groupId]
+    );
+    if (hasChild) return reply.code(400).send({ error: 'No se puede eliminar: tiene sub-ubicaciones' });
+
+    const used = await queryOne<{ ok: number }>(db, 'SELECT 1 AS ok FROM stock_items WHERE location_id = $1::uuid AND group_id = $2 AND deleted_at IS NULL LIMIT 1', [
+      id,
+      groupId,
+    ]);
+    if (used) return reply.code(400).send({ error: 'No se puede eliminar: está en uso por productos' });
+
+    const deleted = await queryOne<{ id: string }>(db, 'DELETE FROM group_locations WHERE id = $1::uuid AND group_id = $2 RETURNING id::text AS id', [id, groupId]);
+    if (!deleted) return reply.code(404).send({ error: 'No encontrado' });
+    emitGroupEvent({ groupId, kind: 'locations' });
+    emitGroupEvent({ groupId, kind: 'inventory' });
+    return reply.send({ ok: true });
   });
 
   app.get('/inventory', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
@@ -62,14 +155,16 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
       display_name: string;
       location_id: string;
       location_path: string;
+      location_detail: string | null;
     }>(
       db,
       [
         'WITH RECURSIVE loc_paths(id, name, parent_id, path) AS (',
-        '  SELECT id, name, parent_id, name AS path FROM locations WHERE parent_id IS NULL',
+        '  SELECT id, name, parent_id, name AS path FROM group_locations WHERE group_id = $1 AND parent_id IS NULL',
         '  UNION ALL',
         '  SELECT l.id, l.name, l.parent_id, loc_paths.path || \' / \' || l.name',
-        '  FROM locations l JOIN loc_paths ON l.parent_id = loc_paths.id',
+        '  FROM group_locations l JOIN loc_paths ON l.parent_id = loc_paths.id',
+        '  WHERE l.group_id = $1',
         ')',
         'SELECT',
         '  si.id AS stock_item_id,',
@@ -79,11 +174,13 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
         '  p.id AS product_id,',
         '  p.brand AS brand,',
         '  p.display_name AS display_name,',
-        '  si.location_id AS location_id,',
-        '  lp.path AS location_path',
+        '  si.location_id::text AS location_id,',
+        '  lp.path AS location_path,',
+        '  gl.detail AS location_detail',
         'FROM stock_items si',
         'JOIN products p ON p.id = si.product_id',
         'JOIN loc_paths lp ON lp.id = si.location_id',
+        'JOIN group_locations gl ON gl.id = si.location_id AND gl.group_id = si.group_id',
         'WHERE si.deleted_at IS NULL AND si.group_id = $1 AND p.group_id = $1',
         'ORDER BY lp.path ASC, p.display_name ASC, p.brand ASC',
       ].join('\n')
@@ -105,16 +202,27 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
     };
     const displayName = typeof body.displayName === 'string' ? body.displayName.trim() : '';
     const brand = typeof body.brand === 'string' ? body.brand.trim() : '';
-    const locationId = typeof body.locationId === 'string' ? body.locationId.trim() : 'loc_sin_ubicacion';
+    let locationId = typeof body.locationId === 'string' ? body.locationId.trim() : '';
     const stockUnit = typeof body.stockUnit === 'string' ? body.stockUnit.trim() : 'unidades';
     const stockCurrent = Number(body.stockCurrent);
     const stockMin = body.stockMin == null ? null : Number(body.stockMin);
 
     if (!displayName) return reply.code(400).send({ error: 'displayName requerido' });
     const finalBrand = brand || 'Sin marca';
-    if (!locationId) return reply.code(400).send({ error: 'locationId inválido' });
+    if (!locationId) {
+      const def = await getDefaultLocationId(db, groupId);
+      if (!def) return reply.code(500).send({ error: 'No hay ubicación por defecto' });
+      locationId = def;
+    }
     if (!Number.isFinite(stockCurrent) || stockCurrent < 0) return reply.code(400).send({ error: 'stockCurrent inválido' });
     if (stockMin != null && (!Number.isFinite(stockMin) || stockMin < 0)) return reply.code(400).send({ error: 'stockMin inválido' });
+
+    const okLoc = await queryOne<{ ok: number }>(
+      db,
+      'SELECT 1 AS ok FROM group_locations WHERE id = $1::uuid AND group_id = $2',
+      [locationId, groupId]
+    );
+    if (!okLoc) return reply.code(400).send({ error: 'Ubicación inválida' });
 
     const normName = normalizeKey(displayName);
     const normBrand = normalizeKey(finalBrand);
@@ -217,14 +325,16 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
       display_name: string;
       location_id: string;
       location_path: string;
+      location_detail: string | null;
     }>(
       db,
       [
         'WITH RECURSIVE loc_paths(id, name, parent_id, path) AS (',
-        '  SELECT id, name, parent_id, name AS path FROM locations WHERE parent_id IS NULL',
+        '  SELECT id, name, parent_id, name AS path FROM group_locations WHERE group_id = $2 AND parent_id IS NULL',
         '  UNION ALL',
         '  SELECT l.id, l.name, l.parent_id, loc_paths.path || \' / \' || l.name',
-        '  FROM locations l JOIN loc_paths ON l.parent_id = loc_paths.id',
+        '  FROM group_locations l JOIN loc_paths ON l.parent_id = loc_paths.id',
+        '  WHERE l.group_id = $2',
         ')',
         'SELECT',
         '  si.id AS stock_item_id,',
@@ -234,11 +344,13 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
         '  p.id AS product_id,',
         '  p.brand AS brand,',
         '  p.display_name AS display_name,',
-        '  si.location_id AS location_id,',
-        '  lp.path AS location_path',
+        '  si.location_id::text AS location_id,',
+        '  lp.path AS location_path,',
+        '  gl.detail AS location_detail',
         'FROM stock_items si',
         'JOIN products p ON p.id = si.product_id',
         'JOIN loc_paths lp ON lp.id = si.location_id',
+        'JOIN group_locations gl ON gl.id = si.location_id AND gl.group_id = si.group_id',
         'WHERE si.id = $1 AND si.deleted_at IS NULL AND si.group_id = $2 AND p.group_id = $2',
         'LIMIT 1',
       ].join('\n'),
@@ -291,7 +403,10 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
       const nextLocationId = locationId ?? row.current_location_id;
 
       if (locationId != null) {
-        const okLoc = await queryOne<{ ok: number }>(db, 'SELECT 1 AS ok FROM locations WHERE id = $1', [nextLocationId]);
+        const okLoc = await queryOne<{ ok: number }>(db, 'SELECT 1 AS ok FROM group_locations WHERE id = $1::uuid AND group_id = $2', [
+          nextLocationId,
+          groupId,
+        ]);
         if (!okLoc) {
           await db.query('ROLLBACK');
           return reply.code(400).send({ error: 'Ubicación inválida' });
@@ -415,10 +530,11 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
       db,
       [
         'WITH RECURSIVE loc_paths(id, name, parent_id, path) AS (',
-        '  SELECT id, name, parent_id, name AS path FROM locations WHERE parent_id IS NULL',
+        '  SELECT id, name, parent_id, name AS path FROM group_locations WHERE group_id = $1 AND parent_id IS NULL',
         '  UNION ALL',
         "  SELECT l.id, l.name, l.parent_id, loc_paths.path || ' / ' || l.name",
-        '  FROM locations l JOIN loc_paths ON l.parent_id = loc_paths.id',
+        '  FROM group_locations l JOIN loc_paths ON l.parent_id = loc_paths.id',
+        '  WHERE l.group_id = $1',
         ')',
         'SELECT',
         '  si.id AS stock_item_id,',
