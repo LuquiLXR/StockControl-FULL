@@ -21,12 +21,8 @@ services:
     environment:
       PORT: 8080
       UPLOAD_DIR: /data/uploads
-    command:
-      [
-        "sh",
-        "-c",
-        "if [ -z \"$DATABASE_URL\" ]; then export DATABASE_URL=\"postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}\"; fi; node dist/index.js",
-      ]
+    command: >
+      sh -c 'if [ -z "$DATABASE_URL" ]; then export DATABASE_URL="postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB"; fi; node dist/index.js'
     depends_on:
       - postgres
     networks:
