@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { Db, queryAll, queryOne } from './db.js';
 import { requireAuth } from './auth.js';
 import { getGroupId, makeRequireGroup } from './groups.js';
+import { emitGroupEvent } from './realtime.js';
 
 function normalizeKey(input: string) {
   return input
@@ -159,6 +160,8 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
       }
 
       await db.query('COMMIT');
+      emitGroupEvent({ groupId, kind: 'inventory' });
+      emitGroupEvent({ groupId, kind: 'shopping' });
       return reply.send({ stockItemId });
     } catch (e) {
       await db.query('ROLLBACK');
@@ -190,6 +193,8 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
       await db.query('UPDATE stock_items SET stock_current = $2, updated_at = now() WHERE id = $1', [stockItemId, next]);
       await db.query('INSERT INTO stock_movements(group_id, stock_item_id, delta, reason) VALUES ($1,$2,$3,$4)', [groupId, stockItemId, delta, reason]);
       await db.query('COMMIT');
+      emitGroupEvent({ groupId, kind: 'inventory' });
+      emitGroupEvent({ groupId, kind: 'shopping' });
       return reply.send({ stockCurrent: next });
     } catch (e) {
       await db.query('ROLLBACK');
@@ -340,6 +345,8 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
       }
 
       await db.query('COMMIT');
+      emitGroupEvent({ groupId, kind: 'inventory' });
+      emitGroupEvent({ groupId, kind: 'shopping' });
       return reply.send({ stockItemId: finalStockItemId });
     } catch (e) {
       await db.query('ROLLBACK');
@@ -372,6 +379,8 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
       stockUnit != null ? [id, groupId, stockMin, stockUnit] : [id, groupId, stockMin]
     );
     if (!updated) return reply.code(404).send({ error: 'Ítem no encontrado' });
+    emitGroupEvent({ groupId, kind: 'inventory' });
+    emitGroupEvent({ groupId, kind: 'shopping' });
     return reply.send({ ok: true });
   });
 
@@ -385,6 +394,8 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
       [id, groupId]
     );
     if (!updated) return reply.code(404).send({ error: 'Ítem no encontrado' });
+    emitGroupEvent({ groupId, kind: 'inventory' });
+    emitGroupEvent({ groupId, kind: 'shopping' });
     return reply.send({ ok: true });
   });
 
@@ -465,6 +476,7 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
       ].join('\n'),
       [groupId, stockItemId, inCart, userId]
     );
+    emitGroupEvent({ groupId, kind: 'shopping' });
     return reply.send({ ok: true });
   });
 
@@ -484,6 +496,7 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
       [groupId, displayName, finalBrand, userId]
     );
     if (!created) return reply.code(500).send({ error: 'No se pudo crear' });
+    emitGroupEvent({ groupId, kind: 'shopping' });
     return reply.send({ id: created.id });
   });
 
@@ -501,6 +514,7 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
       [id, inCart, groupId]
     );
     if (!updated) return reply.code(404).send({ error: 'No encontrado' });
+    emitGroupEvent({ groupId, kind: 'shopping' });
     return reply.send({ ok: true });
   });
 
@@ -511,6 +525,7 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
     if (!id) return reply.code(400).send({ error: 'id requerido' });
     const deleted = await queryOne<{ id: string }>(db, 'DELETE FROM group_shopping_desired WHERE id = $1 AND group_id = $2 RETURNING id', [id, groupId]);
     if (!deleted) return reply.code(404).send({ error: 'No encontrado' });
+    emitGroupEvent({ groupId, kind: 'shopping' });
     return reply.send({ ok: true });
   });
 }

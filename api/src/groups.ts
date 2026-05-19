@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { Db, queryAll, queryOne } from './db.js';
 import { randomToken } from './crypto.js';
 import { requireAuth } from './auth.js';
+import { emitGroupEvent } from './realtime.js';
 
 export function makeRequireGroup(db: Db) {
   return async function requireGroup(req: FastifyRequest, reply: FastifyReply) {
@@ -74,6 +75,7 @@ export async function registerGroupRoutes(app: FastifyInstance, db: Db) {
       const code = inviteCode();
       await db.query('INSERT INTO group_invites(group_id, code, created_by) VALUES ($1,$2,$3)', [created.id, code, userId]);
       await db.query('COMMIT');
+      emitGroupEvent({ groupId: created.id, kind: 'groups' });
       return reply.send({ groupId: created.id, inviteCode: code });
     } catch (e) {
       await db.query('ROLLBACK');
@@ -107,6 +109,7 @@ export async function registerGroupRoutes(app: FastifyInstance, db: Db) {
 
       const group = await queryOne<{ id: string; name: string }>(db, 'SELECT id, name FROM family_groups WHERE id = $1', [inv.group_id]);
       await db.query('COMMIT');
+      emitGroupEvent({ groupId: inv.group_id, kind: 'groups' });
       return reply.send({ groupId: inv.group_id, groupName: group?.name ?? 'Grupo' });
     } catch (e) {
       await db.query('ROLLBACK');
@@ -128,6 +131,7 @@ export async function registerGroupRoutes(app: FastifyInstance, db: Db) {
     if (!role || !isAdminRole(role.role)) return reply.code(403).send({ error: 'Solo admin' });
 
     await db.query('UPDATE family_groups SET name = $1 WHERE id = $2', [name, groupId]);
+    emitGroupEvent({ groupId, kind: 'groups' });
     return reply.send({ groupId, groupName: name });
   });
 
@@ -142,6 +146,7 @@ export async function registerGroupRoutes(app: FastifyInstance, db: Db) {
 
     const code = inviteCode();
     await db.query('INSERT INTO group_invites(group_id, code, created_by) VALUES ($1,$2,$3)', [groupId, code, userId]);
+    emitGroupEvent({ groupId, kind: 'groups' });
     return reply.send({ inviteCode: code });
   });
 
@@ -198,11 +203,13 @@ export async function registerGroupRoutes(app: FastifyInstance, db: Db) {
         }
         await db.query('DELETE FROM family_groups WHERE id = $1', [groupId]);
         await db.query('COMMIT');
+      emitGroupEvent({ groupId, kind: 'groups' });
         return reply.send({ ok: true, deletedGroup: true });
       }
 
       await db.query('DELETE FROM group_memberships WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
       await db.query('COMMIT');
+    emitGroupEvent({ groupId, kind: 'groups' });
       return reply.send({ ok: true, deletedGroup: false });
     } catch (e) {
       await db.query('ROLLBACK');
@@ -263,6 +270,7 @@ export async function registerGroupRoutes(app: FastifyInstance, db: Db) {
 
       await db.query('DELETE FROM group_memberships WHERE group_id = $1 AND user_id = $2', [groupId, targetUserId]);
       await db.query('COMMIT');
+      emitGroupEvent({ groupId, kind: 'groups' });
       return reply.send({ ok: true });
     } catch (e) {
       await db.query('ROLLBACK');
@@ -303,6 +311,7 @@ export async function registerGroupRoutes(app: FastifyInstance, db: Db) {
 
       await db.query('UPDATE group_memberships SET role = $1 WHERE group_id = $2 AND user_id = $3', [nextRole, groupId, targetUserId]);
       await db.query('COMMIT');
+      emitGroupEvent({ groupId, kind: 'groups' });
       return reply.send({ ok: true });
     } catch (e) {
       await db.query('ROLLBACK');
