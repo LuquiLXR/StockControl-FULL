@@ -205,7 +205,7 @@ export async function registerGroupRoutes(app: FastifyInstance, db: Db) {
     const rows = await queryAll<{ user_id: string; email: string; role: string; created_at: string }>(
       db,
       [
-        'SELECT u.id AS user_id, u.email, m.role, m.created_at',
+        "SELECT u.id AS user_id, COALESCE(u.email::text, '') AS email, m.role, m.created_at",
         'FROM group_memberships m',
         'JOIN users u ON u.id = m.user_id',
         'WHERE m.group_id = $1',

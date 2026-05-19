@@ -220,6 +220,24 @@ const migrations: Migration[] = [
       ');',
     ].join('\n'),
   },
+  {
+    version: 4,
+    up: [
+      'ALTER TABLE users ALTER COLUMN email DROP NOT NULL;',
+      'ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;',
+      'CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_not_null ON users(email) WHERE email IS NOT NULL;',
+      '',
+      'CREATE TABLE IF NOT EXISTS user_device_keys (',
+      '  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),',
+      '  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,',
+      '  key_hash TEXT NOT NULL UNIQUE,',
+      '  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),',
+      '  last_used_at TIMESTAMPTZ NULL,',
+      '  revoked_at TIMESTAMPTZ NULL',
+      ');',
+      'CREATE INDEX IF NOT EXISTS idx_user_device_keys_user ON user_device_keys(user_id);',
+    ].join('\n'),
+  },
 ];
 
 export async function runMigrations(db: Db) {

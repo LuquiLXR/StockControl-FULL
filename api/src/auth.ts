@@ -4,7 +4,7 @@ import nodemailer from 'nodemailer';
 import { Db, queryOne } from './db.js';
 import { randomToken, sha256 } from './crypto.js';
 
-type JwtUser = { sub: string; email: string };
+type JwtUser = { sub: string; email?: string };
 
 export function getJwtSecret() {
   const v = process.env.JWT_SECRET;
@@ -12,17 +12,17 @@ export function getJwtSecret() {
   return v;
 }
 
-export function signAccessToken(input: { userId: string; email: string }) {
+export function signAccessToken(input: { userId: string; email?: string }) {
   const secret = getJwtSecret();
-  return jwt.sign({ email: input.email }, secret, { subject: input.userId, expiresIn: '12h' });
+  return jwt.sign({ email: input.email ?? null }, secret, { subject: input.userId, expiresIn: '12h' });
 }
 
 export function verifyAccessToken(token: string) {
   const secret = getJwtSecret();
   const decoded = jwt.verify(token, secret) as jwt.JwtPayload;
   const sub = decoded.sub;
-  const email = typeof decoded.email === 'string' ? decoded.email : '';
-  if (!sub || !email) throw new Error('Invalid token');
+  const email = typeof decoded.email === 'string' ? decoded.email : undefined;
+  if (!sub) throw new Error('Invalid token');
   return { sub, email } satisfies JwtUser;
 }
 
@@ -62,6 +62,54 @@ function buildMagicLink(token: string) {
 }
 
 export async function registerAuthRoutes(app: FastifyInstance, db: Db) {
+  async function issueTokens(userId: string) {
+    const refreshToken = randomToken(32);
+    const refreshHash = sha256(refreshToken);
+    const refreshDays = Number(process.env.REFRESH_TTL_DAYS ?? '30');
+    const ttlDays = Number.isFinite(refreshDays) && refreshDays > 0 ? refreshDays : 30;
+    await db.query('INSERT INTO refresh_tokens(user_id, token_hash, expires_at) VALUES ($1, $2, now() + ($3 || \' days\')::interval)', [
+      userId,
+      refreshHash,
+      String(ttlDays),
+    ]);
+
+    const user = await queryOne<{ email: string | null }>(db, 'SELECT email FROM users WHERE id = $1', [userId]);
+    const accessToken = signAccessToken({ userId, email: user?.email ?? undefined });
+    return { accessToken, refreshToken };
+  }
+
+  app.post('/auth/device/register', async (_req, reply) => {
+    const row = await queryOne<{ id: string }>(db, 'INSERT INTO users(email) VALUES (NULL) RETURNING id', []);
+    const userId = row?.id;
+    if (!userId) return reply.code(500).send({ error: 'No se pudo crear usuario' });
+
+    const deviceKey = randomToken(24);
+    const keyHash = sha256(deviceKey);
+    await db.query('INSERT INTO user_device_keys(user_id, key_hash) VALUES ($1, $2)', [userId, keyHash]);
+
+    const { accessToken, refreshToken } = await issueTokens(userId);
+    return reply.send({ deviceKey, accessToken, refreshToken });
+  });
+
+  app.post('/auth/device/login', async (req, reply) => {
+    const body = req.body as { deviceKey?: unknown };
+    const deviceKey = typeof body?.deviceKey === 'string' ? body.deviceKey.trim() : '';
+    if (!deviceKey) return reply.code(400).send({ error: 'Código inválido' });
+    const keyHash = sha256(deviceKey);
+
+    const row = await queryOne<{ user_id: string; id: string }>(
+      db,
+      'SELECT id, user_id FROM user_device_keys WHERE key_hash = $1 AND revoked_at IS NULL LIMIT 1',
+      [keyHash]
+    );
+    if (!row) return reply.code(401).send({ error: 'Código inválido' });
+
+    await db.query('UPDATE user_device_keys SET last_used_at = now() WHERE id = $1', [row.id]);
+
+    const { accessToken, refreshToken } = await issueTokens(row.user_id);
+    return reply.send({ accessToken, refreshToken });
+  });
+
   app.post('/auth/request-link', async (req, reply) => {
     const body = req.body as { email?: unknown };
     const email = typeof body?.email === 'string' ? body.email.trim().toLowerCase() : '';
@@ -117,19 +165,7 @@ export async function registerAuthRoutes(app: FastifyInstance, db: Db) {
 
     await db.query('UPDATE magic_links SET used_at = now() WHERE id = $1', [row.id]);
 
-    const refreshToken = randomToken(32);
-    const refreshHash = sha256(refreshToken);
-    const refreshDays = Number(process.env.REFRESH_TTL_DAYS ?? '30');
-    const ttlDays = Number.isFinite(refreshDays) && refreshDays > 0 ? refreshDays : 30;
-    await db.query('INSERT INTO refresh_tokens(user_id, token_hash, expires_at) VALUES ($1, $2, now() + ($3 || \' days\')::interval)', [
-      row.user_id,
-      refreshHash,
-      String(ttlDays),
-    ]);
-
-    const user = await queryOne<{ email: string }>(db, 'SELECT email FROM users WHERE id = $1', [row.user_id]);
-    const email = user?.email ?? '';
-    const accessToken = signAccessToken({ userId: row.user_id, email });
+    const { accessToken, refreshToken } = await issueTokens(row.user_id);
     return reply.send({ accessToken, refreshToken });
   });
 
@@ -145,9 +181,8 @@ export async function registerAuthRoutes(app: FastifyInstance, db: Db) {
     );
     if (!row) return reply.code(401).send({ error: 'Refresh token inválido' });
 
-    const user = await queryOne<{ email: string }>(db, 'SELECT email FROM users WHERE id = $1', [row.user_id]);
-    const email = user?.email ?? '';
-    const accessToken = signAccessToken({ userId: row.user_id, email });
+    const user = await queryOne<{ email: string | null }>(db, 'SELECT email FROM users WHERE id = $1', [row.user_id]);
+    const accessToken = signAccessToken({ userId: row.user_id, email: user?.email ?? undefined });
     return reply.send({ accessToken });
   });
 }
