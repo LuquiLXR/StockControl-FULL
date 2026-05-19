@@ -196,6 +196,30 @@ const migrations: Migration[] = [
       'CREATE INDEX IF NOT EXISTS idx_tickets_group ON tickets(group_id);',
     ].join('\n'),
   },
+  {
+    version: 3,
+    up: [
+      'CREATE TABLE IF NOT EXISTS group_shopping_desired (',
+      '  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),',
+      '  group_id UUID NOT NULL REFERENCES family_groups(id) ON DELETE CASCADE,',
+      '  display_name TEXT NOT NULL,',
+      '  brand TEXT NOT NULL,',
+      '  in_cart BOOLEAN NOT NULL DEFAULT false,',
+      '  created_by UUID NULL REFERENCES users(id) ON DELETE SET NULL,',
+      '  created_at TIMESTAMPTZ NOT NULL DEFAULT now()',
+      ');',
+      'CREATE INDEX IF NOT EXISTS idx_group_shopping_desired_group ON group_shopping_desired(group_id, created_at DESC);',
+      '',
+      'CREATE TABLE IF NOT EXISTS group_shopping_low (',
+      '  group_id UUID NOT NULL REFERENCES family_groups(id) ON DELETE CASCADE,',
+      '  stock_item_id UUID NOT NULL REFERENCES stock_items(id) ON DELETE CASCADE,',
+      '  in_cart BOOLEAN NOT NULL DEFAULT false,',
+      '  updated_by UUID NULL REFERENCES users(id) ON DELETE SET NULL,',
+      '  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),',
+      '  PRIMARY KEY (group_id, stock_item_id)',
+      ');',
+    ].join('\n'),
+  },
 ];
 
 export async function runMigrations(db: Db) {

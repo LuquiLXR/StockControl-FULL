@@ -29,6 +29,14 @@ function inviteCode() {
   return randomToken(6).toUpperCase();
 }
 
+async function getMembershipRole(db: Db, groupId: string, userId: string) {
+  return queryOne<{ role: string }>(db, 'SELECT role FROM group_memberships WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
+}
+
+function isAdminRole(role: string) {
+  return role === 'owner' || role === 'admin';
+}
+
 export async function registerGroupRoutes(app: FastifyInstance, db: Db) {
   const requireGroup = makeRequireGroup(db);
 
@@ -112,11 +120,176 @@ export async function registerGroupRoutes(app: FastifyInstance, db: Db) {
     const id = (req.params as any).id as string;
     if (id !== groupId) return reply.code(403).send({ error: 'Grupo inválido' });
 
-    const role = await queryOne<{ role: string }>(db, 'SELECT role FROM group_memberships WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
-    if (!role || role.role !== 'owner') return reply.code(403).send({ error: 'Solo admin' });
+    const role = await getMembershipRole(db, groupId, userId);
+    if (!role || !isAdminRole(role.role)) return reply.code(403).send({ error: 'Solo admin' });
 
     const code = inviteCode();
     await db.query('INSERT INTO group_invites(group_id, code, created_by) VALUES ($1,$2,$3)', [groupId, code, userId]);
     return reply.send({ inviteCode: code });
+  });
+
+  app.get('/groups/:id/invite', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const userId = (req as any).user.sub as string;
+    const groupId = getGroupId(req);
+    const id = (req.params as any).id as string;
+    if (id !== groupId) return reply.code(403).send({ error: 'Grupo inválido' });
+
+    const role = await getMembershipRole(db, groupId, userId);
+    if (!role || !isAdminRole(role.role)) return reply.code(403).send({ error: 'Solo admin' });
+
+    const inv = await queryOne<{ code: string }>(
+      db,
+      [
+        'SELECT code',
+        'FROM group_invites',
+        'WHERE group_id = $1',
+        'AND (expires_at IS NULL OR expires_at > NOW())',
+        'AND (max_uses IS NULL OR uses < max_uses)',
+        'ORDER BY created_at DESC',
+        'LIMIT 1',
+      ].join('\n'),
+      [groupId]
+    );
+
+    if (inv) return reply.send({ inviteCode: inv.code });
+
+    const code = inviteCode();
+    await db.query('INSERT INTO group_invites(group_id, code, created_by) VALUES ($1,$2,$3)', [groupId, code, userId]);
+    return reply.send({ inviteCode: code });
+  });
+
+  app.post('/groups/:id/leave', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const userId = (req as any).user.sub as string;
+    const groupId = getGroupId(req);
+    const id = (req.params as any).id as string;
+    if (id !== groupId) return reply.code(403).send({ error: 'Grupo inválido' });
+
+    await db.query('BEGIN');
+    try {
+      const role = await getMembershipRole(db, groupId, userId);
+      if (!role) return reply.code(404).send({ error: 'No pertenecés al grupo' });
+
+      if (role.role === 'owner') {
+        const others = await queryOne<{ c: string }>(db, 'SELECT COUNT(*)::text AS c FROM group_memberships WHERE group_id = $1 AND user_id <> $2', [
+          groupId,
+          userId,
+        ]);
+        const count = Number(others?.c ?? '0');
+        if (count > 0) {
+          await db.query('ROLLBACK');
+          return reply.code(400).send({ error: 'El creador no puede abandonar el grupo si hay participantes. Promové a otro admin y pedime transferencia.' });
+        }
+        await db.query('DELETE FROM family_groups WHERE id = $1', [groupId]);
+        await db.query('COMMIT');
+        return reply.send({ ok: true, deletedGroup: true });
+      }
+
+      await db.query('DELETE FROM group_memberships WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
+      await db.query('COMMIT');
+      return reply.send({ ok: true, deletedGroup: false });
+    } catch (e) {
+      await db.query('ROLLBACK');
+      return reply.code(500).send({ error: e instanceof Error ? e.message : 'Error' });
+    }
+  });
+
+  app.get('/groups/:id/members', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const userId = (req as any).user.sub as string;
+    const groupId = getGroupId(req);
+    const id = (req.params as any).id as string;
+    if (id !== groupId) return reply.code(403).send({ error: 'Grupo inválido' });
+
+    const role = await getMembershipRole(db, groupId, userId);
+    if (!role || !isAdminRole(role.role)) return reply.code(403).send({ error: 'Solo admin' });
+
+    const rows = await queryAll<{ user_id: string; email: string; role: string; created_at: string }>(
+      db,
+      [
+        'SELECT u.id AS user_id, u.email, m.role, m.created_at',
+        'FROM group_memberships m',
+        'JOIN users u ON u.id = m.user_id',
+        'WHERE m.group_id = $1',
+        "ORDER BY (m.role = 'owner') DESC, (m.role = 'admin') DESC, m.created_at ASC",
+      ].join('\n'),
+      [groupId]
+    );
+
+    return reply.send({ members: rows });
+  });
+
+  app.delete('/groups/:id/members/:userId', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const callerId = (req as any).user.sub as string;
+    const groupId = getGroupId(req);
+    const id = (req.params as any).id as string;
+    if (id !== groupId) return reply.code(403).send({ error: 'Grupo inválido' });
+    const targetUserId = (req.params as any).userId as string;
+    if (!targetUserId) return reply.code(400).send({ error: 'userId requerido' });
+    if (targetUserId === callerId) return reply.code(400).send({ error: 'Usá "Abandonar grupo" para salir.' });
+
+    await db.query('BEGIN');
+    try {
+      const callerRole = await getMembershipRole(db, groupId, callerId);
+      if (!callerRole || !isAdminRole(callerRole.role)) {
+        await db.query('ROLLBACK');
+        return reply.code(403).send({ error: 'Solo admin' });
+      }
+
+      const targetRole = await getMembershipRole(db, groupId, targetUserId);
+      if (!targetRole) {
+        await db.query('ROLLBACK');
+        return reply.code(404).send({ error: 'Participante no encontrado' });
+      }
+      if (targetRole.role === 'owner') {
+        await db.query('ROLLBACK');
+        return reply.code(400).send({ error: 'No se puede eliminar al creador del grupo' });
+      }
+
+      await db.query('DELETE FROM group_memberships WHERE group_id = $1 AND user_id = $2', [groupId, targetUserId]);
+      await db.query('COMMIT');
+      return reply.send({ ok: true });
+    } catch (e) {
+      await db.query('ROLLBACK');
+      return reply.code(500).send({ error: e instanceof Error ? e.message : 'Error' });
+    }
+  });
+
+  app.post('/groups/:id/members/:userId/role', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const callerId = (req as any).user.sub as string;
+    const groupId = getGroupId(req);
+    const id = (req.params as any).id as string;
+    if (id !== groupId) return reply.code(403).send({ error: 'Grupo inválido' });
+    const targetUserId = (req.params as any).userId as string;
+    if (!targetUserId) return reply.code(400).send({ error: 'userId requerido' });
+    if (targetUserId === callerId) return reply.code(400).send({ error: 'No podés cambiar tu propio rol' });
+
+    const body = req.body as { role?: unknown };
+    const nextRole = typeof body?.role === 'string' ? body.role.trim() : '';
+    if (nextRole !== 'member' && nextRole !== 'admin') return reply.code(400).send({ error: 'role inválido' });
+
+    await db.query('BEGIN');
+    try {
+      const callerRole = await getMembershipRole(db, groupId, callerId);
+      if (!callerRole || !isAdminRole(callerRole.role)) {
+        await db.query('ROLLBACK');
+        return reply.code(403).send({ error: 'Solo admin' });
+      }
+
+      const targetRole = await getMembershipRole(db, groupId, targetUserId);
+      if (!targetRole) {
+        await db.query('ROLLBACK');
+        return reply.code(404).send({ error: 'Participante no encontrado' });
+      }
+      if (targetRole.role === 'owner') {
+        await db.query('ROLLBACK');
+        return reply.code(400).send({ error: 'No se puede cambiar el rol del creador' });
+      }
+
+      await db.query('UPDATE group_memberships SET role = $1 WHERE group_id = $2 AND user_id = $3', [nextRole, groupId, targetUserId]);
+      await db.query('COMMIT');
+      return reply.send({ ok: true });
+    } catch (e) {
+      await db.query('ROLLBACK');
+      return reply.code(500).send({ error: e instanceof Error ? e.message : 'Error' });
+    }
   });
 }
