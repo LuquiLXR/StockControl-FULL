@@ -238,6 +238,15 @@ const migrations: Migration[] = [
       'CREATE INDEX IF NOT EXISTS idx_user_device_keys_user ON user_device_keys(user_id);',
     ].join('\n'),
   },
+  {
+    version: 5,
+    up: [
+      'ALTER TABLE users ADD COLUMN IF NOT EXISTS username CITEXT NULL;',
+      'ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT NULL;',
+      'ALTER TABLE users ADD COLUMN IF NOT EXISTS recovery_key_hash TEXT NULL;',
+      'CREATE UNIQUE INDEX IF NOT EXISTS uq_users_username_not_null ON users(username) WHERE username IS NOT NULL;',
+    ].join('\n'),
+  },
 ];
 
 export async function runMigrations(db: Db) {

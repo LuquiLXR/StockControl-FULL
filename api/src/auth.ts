@@ -1,10 +1,14 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
+import { promisify } from 'node:util';
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
 import { Db, queryOne } from './db.js';
 import { randomToken, sha256 } from './crypto.js';
 
 type JwtUser = { sub: string; email?: string };
+
+const scrypt = promisify(scryptCb);
 
 export function getJwtSecret() {
   const v = process.env.JWT_SECRET;
@@ -62,6 +66,32 @@ function buildMagicLink(token: string) {
 }
 
 export async function registerAuthRoutes(app: FastifyInstance, db: Db) {
+  function normalizeUsername(input: string) {
+    return input.trim().toLowerCase();
+  }
+
+  function isValidUsername(username: string) {
+    if (username.length < 3 || username.length > 24) return false;
+    return /^[a-z0-9._-]+$/.test(username);
+  }
+
+  async function hashPassword(password: string) {
+    const salt = randomToken(16);
+    const key = (await scrypt(password, salt, 64)) as Buffer;
+    return `scrypt$${salt}$${key.toString('hex')}`;
+  }
+
+  async function verifyPassword(password: string, stored: string) {
+    const parts = stored.split('$');
+    if (parts.length !== 3) return false;
+    const [algo, salt, hex] = parts;
+    if (algo !== 'scrypt') return false;
+    const key = (await scrypt(password, salt, 64)) as Buffer;
+    const expected = Buffer.from(hex, 'hex');
+    if (expected.length !== key.length) return false;
+    return timingSafeEqual(expected, key);
+  }
+
   async function issueTokens(userId: string) {
     const refreshToken = randomToken(32);
     const refreshHash = sha256(refreshToken);
@@ -77,6 +107,95 @@ export async function registerAuthRoutes(app: FastifyInstance, db: Db) {
     const accessToken = signAccessToken({ userId, email: user?.email ?? undefined });
     return { accessToken, refreshToken };
   }
+
+  app.post('/auth/register', async (req, reply) => {
+    const body = req.body as { username?: unknown; password?: unknown };
+    const usernameRaw = typeof body?.username === 'string' ? body.username : '';
+    const password = typeof body?.password === 'string' ? body.password : '';
+    const username = normalizeUsername(usernameRaw);
+    if (!isValidUsername(username)) {
+      return reply.code(400).send({ error: 'Usuario inválido. Usá 3-24 caracteres: a-z, 0-9, punto, guion o guion bajo.' });
+    }
+    if (password.trim().length < 6) return reply.code(400).send({ error: 'La contraseña debe tener al menos 6 caracteres.' });
+
+    const exists = await queryOne<{ id: string }>(db, 'SELECT id FROM users WHERE username = $1', [username]);
+    if (exists) return reply.code(409).send({ error: 'Ese usuario ya existe.' });
+
+    const passwordHash = await hashPassword(password);
+    const recoveryKey = randomToken(24);
+    const recoveryHash = sha256(recoveryKey);
+
+    const row = await queryOne<{ id: string }>(
+      db,
+      'INSERT INTO users(email, username, password_hash, recovery_key_hash) VALUES (NULL, $1, $2, $3) RETURNING id',
+      [username, passwordHash, recoveryHash]
+    );
+    const userId = row?.id;
+    if (!userId) return reply.code(500).send({ error: 'No se pudo crear usuario' });
+
+    const { accessToken, refreshToken } = await issueTokens(userId);
+    return reply.send({ recoveryKey, accessToken, refreshToken });
+  });
+
+  app.post('/auth/login', async (req, reply) => {
+    const body = req.body as { username?: unknown; password?: unknown };
+    const usernameRaw = typeof body?.username === 'string' ? body.username : '';
+    const password = typeof body?.password === 'string' ? body.password : '';
+    const username = normalizeUsername(usernameRaw);
+    if (!username || !password) return reply.code(400).send({ error: 'Usuario y contraseña requeridos.' });
+
+    const user = await queryOne<{ id: string; password_hash: string | null }>(db, 'SELECT id, password_hash FROM users WHERE username = $1', [username]);
+    if (!user?.id || !user.password_hash) return reply.code(401).send({ error: 'Credenciales inválidas.' });
+    const ok = await verifyPassword(password, user.password_hash);
+    if (!ok) return reply.code(401).send({ error: 'Credenciales inválidas.' });
+
+    const { accessToken, refreshToken } = await issueTokens(user.id);
+    return reply.send({ accessToken, refreshToken });
+  });
+
+  app.post('/auth/password/reset', async (req, reply) => {
+    const body = req.body as { username?: unknown; recoveryKey?: unknown; newPassword?: unknown };
+    const usernameRaw = typeof body?.username === 'string' ? body.username : '';
+    const recoveryKey = typeof body?.recoveryKey === 'string' ? body.recoveryKey.trim() : '';
+    const newPassword = typeof body?.newPassword === 'string' ? body.newPassword : '';
+    const username = normalizeUsername(usernameRaw);
+    if (!username || !recoveryKey) return reply.code(400).send({ error: 'Usuario y código de recuperación requeridos.' });
+    if (newPassword.trim().length < 6) return reply.code(400).send({ error: 'La contraseña debe tener al menos 6 caracteres.' });
+
+    const user = await queryOne<{ id: string; recovery_key_hash: string | null }>(
+      db,
+      'SELECT id, recovery_key_hash FROM users WHERE username = $1',
+      [username]
+    );
+    if (!user?.id || !user.recovery_key_hash) return reply.code(401).send({ error: 'Datos inválidos.' });
+    if (sha256(recoveryKey) !== user.recovery_key_hash) return reply.code(401).send({ error: 'Datos inválidos.' });
+
+    const nextPasswordHash = await hashPassword(newPassword);
+    const nextRecoveryKey = randomToken(24);
+    const nextRecoveryHash = sha256(nextRecoveryKey);
+    await db.query('UPDATE users SET password_hash = $1, recovery_key_hash = $2 WHERE id = $3', [nextPasswordHash, nextRecoveryHash, user.id]);
+
+    const { accessToken, refreshToken } = await issueTokens(user.id);
+    return reply.send({ recoveryKey: nextRecoveryKey, accessToken, refreshToken });
+  });
+
+  app.post('/auth/password/change', { preHandler: [requireAuth] }, async (req, reply) => {
+    const userId = (req as any).user.sub as string;
+    const body = req.body as { currentPassword?: unknown; newPassword?: unknown };
+    const currentPassword = typeof body?.currentPassword === 'string' ? body.currentPassword : '';
+    const newPassword = typeof body?.newPassword === 'string' ? body.newPassword : '';
+    if (!currentPassword || !newPassword) return reply.code(400).send({ error: 'Campos requeridos.' });
+    if (newPassword.trim().length < 6) return reply.code(400).send({ error: 'La contraseña debe tener al menos 6 caracteres.' });
+
+    const row = await queryOne<{ password_hash: string | null }>(db, 'SELECT password_hash FROM users WHERE id = $1', [userId]);
+    if (!row?.password_hash) return reply.code(400).send({ error: 'La cuenta no tiene contraseña configurada.' });
+    const ok = await verifyPassword(currentPassword, row.password_hash);
+    if (!ok) return reply.code(401).send({ error: 'Contraseña incorrecta.' });
+
+    const nextPasswordHash = await hashPassword(newPassword);
+    await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [nextPasswordHash, userId]);
+    return reply.send({ ok: true });
+  });
 
   app.post('/auth/device/register', async (_req, reply) => {
     const row = await queryOne<{ id: string }>(db, 'INSERT INTO users(email) VALUES (NULL) RETURNING id', []);
