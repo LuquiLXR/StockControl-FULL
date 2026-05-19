@@ -4,10 +4,8 @@ services:
     image: postgres:16-alpine
     container_name: stockcontrol-postgres
     restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    env_file:
+      - ./env/.env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -18,24 +16,17 @@ services:
       dockerfile: Dockerfile
     container_name: stockcontrol-api
     restart: unless-stopped
+    env_file:
+      - ./env/.env
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      NODE_ENV: ${NODE_ENV:-production}
       PORT: 8080
-      JWT_SECRET: ${JWT_SECRET}
-      MAGIC_LINK_CALLBACK_URL: ${MAGIC_LINK_CALLBACK_URL}
-      MAGIC_LINK_TTL_MINUTES: ${MAGIC_LINK_TTL_MINUTES:-15}
-      REFRESH_TTL_DAYS: ${REFRESH_TTL_DAYS:-30}
-      AUTH_DEV_RETURN_TOKEN: ${AUTH_DEV_RETURN_TOKEN:-false}
-      SMTP_HOST: ${SMTP_HOST:-}
-      SMTP_PORT: ${SMTP_PORT:-}
-      SMTP_USER: ${SMTP_USER:-}
-      SMTP_PASS: ${SMTP_PASS:-}
-      SMTP_FROM: ${SMTP_FROM:-}
-      CORS_ORIGIN: ${CORS_ORIGIN:-}
       UPLOAD_DIR: /data/uploads
-      OCR_WORKER_ENABLED: ${OCR_WORKER_ENABLED:-true}
-      OCR_WORKER_POLL_MS: ${OCR_WORKER_POLL_MS:-2000}
+    command:
+      [
+        "sh",
+        "-c",
+        "if [ -z \"$DATABASE_URL\" ]; then export DATABASE_URL=\"postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}\"; fi; node dist/index.js",
+      ]
     depends_on:
       - postgres
     networks:
@@ -48,11 +39,10 @@ services:
     image: prodrigestivill/postgres-backup-local:15
     container_name: stockcontrol-pgbackups
     restart: unless-stopped
+    env_file:
+      - ./env/.env
     environment:
       POSTGRES_HOST: postgres
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       SCHEDULE: "0 2 * * *"
       BACKUP_DIR: /backups
     volumes:
