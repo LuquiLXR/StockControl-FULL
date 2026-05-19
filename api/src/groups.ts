@@ -114,6 +114,23 @@ export async function registerGroupRoutes(app: FastifyInstance, db: Db) {
     }
   });
 
+  app.post('/groups/:id/rename', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
+    const userId = (req as any).user.sub as string;
+    const groupId = getGroupId(req);
+    const id = (req.params as any).id as string;
+    if (id !== groupId) return reply.code(403).send({ error: 'Grupo inválido' });
+
+    const body = req.body as { name?: unknown };
+    const name = typeof body?.name === 'string' ? body.name.trim() : '';
+    if (!name) return reply.code(400).send({ error: 'name requerido' });
+
+    const role = await getMembershipRole(db, groupId, userId);
+    if (!role || !isAdminRole(role.role)) return reply.code(403).send({ error: 'Solo admin' });
+
+    await db.query('UPDATE family_groups SET name = $1 WHERE id = $2', [name, groupId]);
+    return reply.send({ groupId, groupName: name });
+  });
+
   app.post('/groups/:id/invite/rotate', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
     const userId = (req as any).user.sub as string;
     const groupId = getGroupId(req);
