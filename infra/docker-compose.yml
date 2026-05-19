@@ -5,7 +5,7 @@ services:
     container_name: stockcontrol-postgres
     restart: unless-stopped
     env_file:
-      - ./infra/env/.env
+      - ./env/.env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -17,12 +17,12 @@ services:
     container_name: stockcontrol-api
     restart: unless-stopped
     env_file:
-      - ./infra/env/.env
+      - ./env/.env
     environment:
       PORT: 8080
       UPLOAD_DIR: /data/uploads
     command: >
-      sh -c 'if [ -z "$DATABASE_URL" ]; then export DATABASE_URL="postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB"; fi; node dist/index.js'
+      sh -c 'if [ -z "$$DATABASE_URL" ]; then export DATABASE_URL="postgres://$$POSTGRES_USER:$$POSTGRES_PASSWORD@postgres:5432/$$POSTGRES_DB"; fi; node dist/index.js'
     depends_on:
       - postgres
     networks:
@@ -36,7 +36,7 @@ services:
     container_name: stockcontrol-pgbackups
     restart: unless-stopped
     env_file:
-      - ./infra/env/.env
+      - ./env/.env
     environment:
       POSTGRES_HOST: postgres
       SCHEDULE: "0 2 * * *"
