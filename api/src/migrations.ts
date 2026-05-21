@@ -329,7 +329,7 @@ const migrations: Migration[] = [
       "    ALTER TABLE refresh_tokens ALTER COLUMN expires_at DROP NOT NULL;",
       "  END IF;",
       "END $$;",
-    ].join('\\n'),
+    ].join('\n'),
   },
 ];
 
