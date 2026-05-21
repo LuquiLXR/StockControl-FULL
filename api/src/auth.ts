@@ -95,13 +95,21 @@ export async function registerAuthRoutes(app: FastifyInstance, db: Db) {
   async function issueTokens(userId: string) {
     const refreshToken = randomToken(32);
     const refreshHash = sha256(refreshToken);
-    const refreshDays = Number(process.env.REFRESH_TTL_DAYS ?? '30');
-    const ttlDays = Number.isFinite(refreshDays) && refreshDays > 0 ? refreshDays : 30;
-    await db.query('INSERT INTO refresh_tokens(user_id, token_hash, expires_at) VALUES ($1, $2, now() + ($3 || \' days\')::interval)', [
-      userId,
-      refreshHash,
-      String(ttlDays),
-    ]);
+    const refreshTtlRaw = String(process.env.REFRESH_TTL_DAYS ?? '').trim().toLowerCase();
+    const refreshDays =
+      !refreshTtlRaw || ['indefinido', 'indefinida', 'indefinite', 'infinite', 'none', 'null'].includes(refreshTtlRaw)
+        ? null
+        : Number(refreshTtlRaw);
+    const ttlDays = refreshDays != null && Number.isFinite(refreshDays) && refreshDays > 0 ? refreshDays : null;
+    if (ttlDays == null) {
+      await db.query('INSERT INTO refresh_tokens(user_id, token_hash, expires_at) VALUES ($1, $2, NULL)', [userId, refreshHash]);
+    } else {
+      await db.query('INSERT INTO refresh_tokens(user_id, token_hash, expires_at) VALUES ($1, $2, now() + ($3 || \' days\')::interval)', [
+        userId,
+        refreshHash,
+        String(ttlDays),
+      ]);
+    }
 
     const user = await queryOne<{ email: string | null }>(db, 'SELECT email FROM users WHERE id = $1', [userId]);
     const accessToken = signAccessToken({ userId, email: user?.email ?? undefined });
@@ -295,7 +303,7 @@ export async function registerAuthRoutes(app: FastifyInstance, db: Db) {
     const refreshHash = sha256(refreshToken);
     const row = await queryOne<{ user_id: string }>(
       db,
-      'SELECT user_id FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now() ORDER BY created_at DESC LIMIT 1',
+      'SELECT user_id FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now()) ORDER BY created_at DESC LIMIT 1',
       [refreshHash]
     );
     if (!row) return reply.code(401).send({ error: 'Refresh token inválido' });

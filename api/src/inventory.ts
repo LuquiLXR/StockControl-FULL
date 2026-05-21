@@ -39,15 +39,6 @@ async function ensureShoppingTables(db: Db) {
   );
 }
 
-async function getDefaultLocationId(db: Db, groupId: string) {
-  const row = await queryOne<{ id: string }>(
-    db,
-    "SELECT id::text AS id FROM group_locations WHERE group_id = $1 AND parent_id IS NULL AND name = 'Sin ubicación' ORDER BY sort_order ASC, created_at ASC LIMIT 1",
-    [groupId]
-  );
-  return row?.id ?? null;
-}
-
 export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
   const requireGroup = makeRequireGroup(db);
 
@@ -209,11 +200,7 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
 
     if (!displayName) return reply.code(400).send({ error: 'displayName requerido' });
     const finalBrand = brand || 'Sin marca';
-    if (!locationId) {
-      const def = await getDefaultLocationId(db, groupId);
-      if (!def) return reply.code(500).send({ error: 'No hay ubicación por defecto' });
-      locationId = def;
-    }
+    if (!locationId) return reply.code(400).send({ error: 'locationId requerido' });
     if (!Number.isFinite(stockCurrent) || stockCurrent < 0) return reply.code(400).send({ error: 'stockCurrent inválido' });
     if (stockMin != null && (!Number.isFinite(stockMin) || stockMin < 0)) return reply.code(400).send({ error: 'stockMin inválido' });
 

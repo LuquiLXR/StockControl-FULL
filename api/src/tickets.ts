@@ -91,15 +91,7 @@ export async function registerTicketRoutes(app: FastifyInstance, db: Db) {
     const ticket = await queryOne<{ id: string }>(db, 'SELECT id FROM tickets WHERE id = $1 AND group_id = $2', [id, groupId]);
     if (!ticket) return reply.code(404).send({ error: 'Ticket no encontrado' });
 
-    if (!locationId) {
-      const def = await queryOne<{ id: string }>(
-        db,
-        "SELECT id::text AS id FROM group_locations WHERE group_id = $1 AND parent_id IS NULL AND name = 'Sin ubicación' ORDER BY sort_order ASC, created_at ASC LIMIT 1",
-        [groupId]
-      );
-      locationId = def?.id ?? '';
-    }
-    if (!locationId) return reply.code(500).send({ error: 'No hay ubicación por defecto' });
+    if (!locationId) return reply.code(400).send({ error: 'locationId requerido' });
 
     const okLoc = await queryOne<{ ok: number }>(db, 'SELECT 1 AS ok FROM group_locations WHERE id = $1::uuid AND group_id = $2', [locationId, groupId]);
     if (!okLoc) return reply.code(400).send({ error: 'Ubicación inválida' });
