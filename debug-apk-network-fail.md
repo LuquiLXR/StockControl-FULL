@@ -24,6 +24,7 @@
 4) Aplicar fix mínimo basado en evidencia.
 
 ## Estado
-- Debug Server: pendiente
-- Instrumentación: pendiente
-- RunId: pre-fix pendiente
+- Debug Server: activo (modo remote)
+- Instrumentación: activa (pre-fix)
+- Observación: no se recibieron eventos (posible bloqueo de cleartext/permiso a nivel APK)
+- Acción aplicada: config plugin Android para forzar `usesCleartextTraffic=true` + `networkSecurityConfig` con cleartext permitido
