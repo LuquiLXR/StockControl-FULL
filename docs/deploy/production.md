@@ -60,7 +60,7 @@
 - La app móvil usa `expo.extra.apiBaseUrl` (ver `mobile/app.json`) como base de la API.
 - En Android, para que el APK pueda realizar requests de red:
   - Debe incluir permisos de red (`INTERNET`, `ACCESS_NETWORK_STATE`).
-  - Si la API es HTTP (sin TLS), debe estar habilitado cleartext (`usesCleartextTraffic: true`).
+  - Si la API es HTTP (sin TLS), debe estar habilitado cleartext (`usesCleartextTraffic: true`) y (en algunos dispositivos/versions) definir `networkSecurityConfig` para permitir tráfico HTTP.
 - Verificación automática de conectividad (antes de compilar un APK):
   - En `mobile/`: `npm run verify:network` (valida `GET {apiBaseUrl}/health`).
 - Recomendación: usar HTTPS en producción para evitar dependencia de cleartext y endurecer seguridad.
