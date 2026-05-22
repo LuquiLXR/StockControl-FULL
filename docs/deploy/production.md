@@ -56,6 +56,15 @@
   - Registro de contenedores y token de acceso.
   - Claves/secretos en el servicio de CI (Variables/Secrets).
 
+## Mobile (APK) - Red y Login
+- La app móvil usa `expo.extra.apiBaseUrl` (ver `mobile/app.json`) como base de la API.
+- En Android, para que el APK pueda realizar requests de red:
+  - Debe incluir permisos de red (`INTERNET`, `ACCESS_NETWORK_STATE`).
+  - Si la API es HTTP (sin TLS), debe estar habilitado cleartext (`usesCleartextTraffic: true`).
+- Verificación automática de conectividad (antes de compilar un APK):
+  - En `mobile/`: `npm run verify:network` (valida `GET {apiBaseUrl}/health`).
+- Recomendación: usar HTTPS en producción para evitar dependencia de cleartext y endurecer seguridad.
+
 ## Pruebas de Carga/Estrés (Plantilla)
 - Herramienta sugerida: k6.
 - Escenarios:
