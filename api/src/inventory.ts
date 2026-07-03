@@ -13,6 +13,28 @@ function normalizeKey(input: string) {
     .replace(/\s+/g, ' ');
 }
 
+async function ensureDefaultLocationId(db: Db, groupId: string) {
+  const existing = await queryOne<{ id: string }>(
+    db,
+    "SELECT id::text AS id FROM group_locations WHERE group_id = $1 AND parent_id IS NULL AND lower(name) = lower('Sin ubicación') ORDER BY sort_order ASC, name ASC LIMIT 1",
+    [groupId]
+  );
+  if (existing?.id) return existing.id;
+  const created = await queryOne<{ id: string }>(
+    db,
+    "INSERT INTO group_locations(group_id, name, detail, parent_id, sort_order) VALUES ($1, 'Sin ubicación', NULL, NULL, 99) RETURNING id::text AS id",
+    [groupId]
+  );
+  if (created?.id) return created.id;
+  const again = await queryOne<{ id: string }>(
+    db,
+    "SELECT id::text AS id FROM group_locations WHERE group_id = $1 AND parent_id IS NULL AND lower(name) = lower('Sin ubicación') ORDER BY sort_order ASC, name ASC LIMIT 1",
+    [groupId]
+  );
+  if (!again?.id) throw new Error('No se pudo asegurar ubicación por defecto');
+  return again.id;
+}
+
 async function ensureShoppingTables(db: Db) {
   await db.query(
     [
@@ -44,11 +66,19 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
 
   app.get('/locations', { preHandler: [requireAuth, requireGroup] }, async (req, reply) => {
     const groupId = getGroupId(req);
-    const rows = await queryAll<{ id: string; name: string; detail: string | null; parent_id: string | null; sort_order: number }>(
+    let rows = await queryAll<{ id: string; name: string; detail: string | null; parent_id: string | null; sort_order: number }>(
       db,
       "SELECT id::text AS id, name, detail, parent_id::text AS parent_id, sort_order FROM group_locations WHERE group_id = $1 ORDER BY sort_order ASC, name ASC",
       [groupId]
     );
+    if (rows.length === 0) {
+      await ensureDefaultLocationId(db, groupId);
+      rows = await queryAll<{ id: string; name: string; detail: string | null; parent_id: string | null; sort_order: number }>(
+        db,
+        "SELECT id::text AS id, name, detail, parent_id::text AS parent_id, sort_order FROM group_locations WHERE group_id = $1 ORDER BY sort_order ASC, name ASC",
+        [groupId]
+      );
+    }
     return reply.send({ locations: rows });
   });
 
@@ -200,7 +230,7 @@ export async function registerInventoryRoutes(app: FastifyInstance, db: Db) {
 
     if (!displayName) return reply.code(400).send({ error: 'displayName requerido' });
     const finalBrand = brand || 'Sin marca';
-    if (!locationId) return reply.code(400).send({ error: 'locationId requerido' });
+    if (!locationId) locationId = await ensureDefaultLocationId(db, groupId);
     if (!Number.isFinite(stockCurrent) || stockCurrent < 0) return reply.code(400).send({ error: 'stockCurrent inválido' });
     if (stockMin != null && (!Number.isFinite(stockMin) || stockMin < 0)) return reply.code(400).send({ error: 'stockMin inválido' });
 

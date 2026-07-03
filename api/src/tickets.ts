@@ -7,6 +7,28 @@ import { Db, queryAll, queryOne } from './db.js';
 import { requireAuth } from './auth.js';
 import { getGroupId, makeRequireGroup } from './groups.js';
 
+async function ensureDefaultLocationId(db: Db, groupId: string) {
+  const existing = await queryOne<{ id: string }>(
+    db,
+    "SELECT id::text AS id FROM group_locations WHERE group_id = $1 AND parent_id IS NULL AND lower(name) = lower('Sin ubicación') ORDER BY sort_order ASC, name ASC LIMIT 1",
+    [groupId]
+  );
+  if (existing?.id) return existing.id;
+  const created = await queryOne<{ id: string }>(
+    db,
+    "INSERT INTO group_locations(group_id, name, detail, parent_id, sort_order) VALUES ($1, 'Sin ubicación', NULL, NULL, 99) RETURNING id::text AS id",
+    [groupId]
+  );
+  if (created?.id) return created.id;
+  const again = await queryOne<{ id: string }>(
+    db,
+    "SELECT id::text AS id FROM group_locations WHERE group_id = $1 AND parent_id IS NULL AND lower(name) = lower('Sin ubicación') ORDER BY sort_order ASC, name ASC LIMIT 1",
+    [groupId]
+  );
+  if (!again?.id) throw new Error('No se pudo asegurar ubicación por defecto');
+  return again.id;
+}
+
 export async function registerTicketRoutes(app: FastifyInstance, db: Db) {
   const requireGroup = makeRequireGroup(db);
 
@@ -91,7 +113,7 @@ export async function registerTicketRoutes(app: FastifyInstance, db: Db) {
     const ticket = await queryOne<{ id: string }>(db, 'SELECT id FROM tickets WHERE id = $1 AND group_id = $2', [id, groupId]);
     if (!ticket) return reply.code(404).send({ error: 'Ticket no encontrado' });
 
-    if (!locationId) return reply.code(400).send({ error: 'locationId requerido' });
+    if (!locationId) locationId = await ensureDefaultLocationId(db, groupId);
 
     const okLoc = await queryOne<{ ok: number }>(db, 'SELECT 1 AS ok FROM group_locations WHERE id = $1::uuid AND group_id = $2', [locationId, groupId]);
     if (!okLoc) return reply.code(400).send({ error: 'Ubicación inválida' });
